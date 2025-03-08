@@ -1,0 +1,24 @@
+[project]
+dynamic = ["version"]
+nd280-ml-reco
+version=0.0.1
+
+dependencies = [
+  "torch",
+  "torch_geometric",
+  "numpy",
+  "matplotlib"
+]
+
+autors = [
+  { name="Ewan Miller", email="emiller@ifae.es"}
+]
+
+maintainers = [
+  { name="Ewan Miller", email="emiller@ifae.es"}
+]
+
+description = "Package for performing machine learning based reconstruction of particle tracks in the ND280 detector."
+
+readme = "README.md"
+
