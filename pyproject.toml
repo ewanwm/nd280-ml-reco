@@ -1,7 +1,6 @@
 [project]
 dynamic = ["version"]
 name="nd280-ml-reco"
-version="0.0.1"
 
 dependencies = [
   "torch",
@@ -10,7 +9,7 @@ dependencies = [
   "matplotlib"
 ]
 
-autors = [
+authors = [
   { name="Ewan Miller", email="emiller@ifae.es"}
 ]
 
