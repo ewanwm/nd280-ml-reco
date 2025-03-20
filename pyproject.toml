@@ -6,7 +6,11 @@ dependencies = [
   "torch",
   "torch_geometric",
   "numpy",
-  "matplotlib"
+  "matplotlib",
+  "uproot",
+  "pdg",
+  "pandas",
+  "awkward-pandas"
 ]
 
 authors = [
