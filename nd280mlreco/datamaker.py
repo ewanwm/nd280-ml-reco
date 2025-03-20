@@ -1,5 +1,7 @@
 import typing
 from collections import namedtuple
+from collections.abc import Callable
+from typing import NamedTuple, Any
 import os
 
 import pdg
@@ -8,6 +10,7 @@ import numpy as np
 
 import torch
 from torch_geometric.data import Dataset, Data
+from torch_geometric.transforms import RadiusGraph
 from torch_geometric.explain import Explanation
 from torch_geometric import utils as tg_utils
 
@@ -15,17 +18,97 @@ import time
 import networkx as nx
 import matplotlib.pyplot as plt
 
+from itertools import groupby, product
+
+import logging
+
 pdg_api = pdg.connect()
 
-Hit = namedtuple("Hit", ["t", "y", "z", "charge", "hit_id"])
-Hit.__doc__ = '''\
-A hit in the detector
+class Hit(NamedTuple):
+    '''
+    A hit in the detector
 
-t - The time of the hit
-y - The y position of the hit (up and down)
-z - The z position of the hit (along the beam direction)
-hit_id - Should be a unique identifier for this hit
-'''
+    attributes:
+        t - The time of the hit
+        y - The y position of the hit (up and down)
+        z - The z position of the hit (along the beam direction)
+        row - The row of the pad hit in the HAT
+        col - The column of the pad hit in the HAT
+        charge - The charge deposited in the pad
+        id - Should be a unique identifier for this hit
+        tracks - The IDs of the tracks that contributed to this hit
+    '''
+
+    t:float
+    y:float
+    z:float
+    row:int
+    col:int
+    charge:float
+    id:int
+    tracks:list[int]
+
+    def __hash__(self):
+        return hash(self.t) * hash(self.y) * hash(self.z) * hash(self.row) * hash(self.col) * hash(self.charge) * hash(self.id)
+
+class HATCluster:
+    ''' Describes a collection of hits in a HAT
+    '''
+    def __init__(self, hits:list[Hit], cluster_id:int):
+        self.charge = self._get_charge_from_hits(hits)
+        self.t = self._get_time_from_hits(hits)
+        self.y = self._get_y_from_hits(hits)
+        self.z = self._get_z_from_hits(hits)
+        self.tracks = self._get_tracks_from_hits(hits)
+        self.n_hits = len(hits)
+        self.id = cluster_id
+
+    def _get_charge_from_hits(self, hits:list[Hit]):
+        c = 0.0
+
+        for hit in hits:
+            c += hit.charge
+
+        return c
+
+    def _get_time_from_hits(self, hits:list[Hit]):
+        if(self.charge is None):
+            raise ValueError("Must do get_charge_from_hits() first")
+        
+        t = 0.0
+        for hit in hits:
+            t += hit.t * hit.charge / self.charge
+
+        return t
+    
+    def _get_y_from_hits(self, hits:list[Hit]):
+        if(self.charge is None):
+            raise ValueError("Must do get_charge_from_hits() first")
+        
+        y= 0.0
+        for hit in hits:
+            y += hit.y * hit.charge / self.charge
+        
+        return y
+    
+    def _get_z_from_hits(self, hits:list[Hit]):
+        if(self.charge is None):
+            raise ValueError("Must do get_charge_from_hits() first")
+        
+        z = 0.0
+        for hit in hits:
+            z += hit.z * hit.charge / self.charge
+        
+        return z
+    
+    def _get_tracks_from_hits(self, hits:list[Hit]):
+        tracks = set()
+
+        for hit in hits:
+            for track in hit.tracks:
+                tracks.add(track)
+
+        return tracks
 
 # Print iterations progress (stolen from https://stackoverflow.com/questions/3173320/text-progress-bar-in-terminal-with-block-characters)
 def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, length = 50, fill = '█', printEnd = "\r"):
@@ -49,6 +132,18 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
     if iteration == total:
         print()
 
+def HATManhattan(hit1:Hit, hit2:Hit, use_time=False):
+    ''' Get the Manhattan distance between two HAT hits.
+
+    This is abs(hit1["col"] - hit2["col"]) + abs(hit1["row"] - hit2["row"]) 
+    '''
+
+    ret = abs(int(hit1.row) - int(hit2.row)) + abs(int(hit1.col) - int(hit2.col))
+    if use_time:
+        ret += abs(int(hit1.t) - int(hit2.t))
+
+    return ret
+
 class Track:
     ''' Hold information about a track, including the Hit objects that make it up. '''
     
@@ -58,6 +153,7 @@ class Track:
         self._parent_id:int = pid
         
         self._hits = []
+        self._clusters = []
         #self._particle = pdg_api.get_particle_by_mcid(pid)
 
     def get_hits(self) -> list[Hit]:
@@ -65,6 +161,16 @@ class Track:
 
     def add_hit(self, hit:Hit) -> None:
         self._hits.append(hit)
+
+    def get_clusters(self) -> list[HATCluster]:   
+        return self._clusters
+
+    def add_cluster(self, cluster:HATCluster) -> None:
+
+        if self._clusters is None:
+            self._clusters = []
+
+        self._clusters.append(cluster)
 
     def get_id(self) -> int:
         return self._id
@@ -77,24 +183,35 @@ class Track:
 
     def get_parent_id(self) -> int:
         return self._parent_id
+    
+    def print(self, log_cmd:Callable=print) -> int:
+        log_cmd(f'### track {self._id} ###')
+        log_cmd(f'  - PID: {self._pid}')
+        log_cmd(f'  - parent ID: {self._parent_id}')
+        log_cmd(f'  - has {len(self._hits)} hits:')
+        for hit in self._hits:
+            log_cmd("    ->",hit)
 
 class Event:
     ''' Hold information about an event, including all tracks that make it up. '''
     
-    def __init__(self, event_id:int):
+    def __init__(self, event_id:int, logger:logging.Logger):
         self._id:int = event_id
 
         ## mapping between track IDs and the track objects themselves
         self._tracks:typing.Dict[int,Track] = {}
 
         self._hits = []
+        self._clusters = None
 
-    def print(self) -> None:
-        print(f'### Event ID {self._id} ###')
-        print(f'  - has {len(self._hits)} hits')
-        print(f'  - has {len(self._tracks)} tracks:')
+        self._logger = logger
+
+    def print(self, log_cmd:Callable=print) -> None:
+        log_cmd(f'### Event ID {self._id} ###')
+        log_cmd(f'  - has {len(self._hits)} hits')
+        log_cmd(f'  - has {len(self._tracks)} tracks:')
         for track in self._tracks.values():
-            print(f'    -> ID: {track.get_id()} :: PDG: {track.get_pid()} :: Parent ID: {track.get_parent_id()} :: has {len(track.get_hits())} hits')
+            log_cmd(f'    -> ID: {track.get_id()} :: PDG: {track.get_pid()} :: Parent ID: {track.get_parent_id()} :: has {len(track.get_hits())} hits')
 
     def get_id(self) -> int:
         ''' Get the ID of this event. '''
@@ -103,6 +220,12 @@ class Event:
 
     def add_track(self, track:Track):
         self._tracks[track.get_id()] = track
+
+    def get_tracks(self) -> list[Hit]:
+        return self._hits
+
+    def get_clusters(self) -> list[HATCluster]:
+        return self._clusters
 
     def add_hit(self, hit:Hit, track_id_list:typing.List[int]) -> None:
         ''' Add a hit to a track within this event. '''
@@ -124,38 +247,205 @@ class Event:
             else:
                 self._tracks[track_id].add_hit(hit)
 
-    def build_input_graph(self, max_dist:float) -> Data:
+    def build_clusters(self, max_manhattan_dist=1, min_charge_thresh=0.0) -> None:
+        ''' Construct clusters of hits.
+        
+        Connects all cells which are connected with a Manhattan distance less than the max specified distance
+        '''
+
+        self._clusters = []
+
+        # Group Adjacent Coordinates
+        # Using product() + groupby() + list comprehension
+        man_tups = [sub for sub in product(self._hits, repeat = 2)
+                                                if HATManhattan(*sub, use_time=True) <= max_manhattan_dist]
+        
+        res_dict = {ele: {ele} for ele in self._hits}
+        for tup1, tup2 in man_tups:
+            for tup3 in res_dict[tup2]:
+                res_dict[tup1] |= res_dict[tup3]
+                res_dict[tup3] = res_dict[tup1]
+        
+        clusters = [[*next(val)] for key, val in groupby(
+                sorted(res_dict.values(), key = id), id)]
+        
+        self._logger.debug("The found clusters: ")
+
+        good_clusters:int = 0
+        for cluster_hits in clusters:
+            self._logger.debug(f"  {[f'({c.t}, {c.col}, {c.row} :: {c.charge}) ' for c in cluster_hits]}")
+            cluster_obj = HATCluster(cluster_hits, -999)
+
+            if cluster_obj.charge >= min_charge_thresh:
+                cluster_obj.id = good_clusters
+                self._clusters.append(cluster_obj)
+
+                for track_id in cluster_obj.tracks:
+                    if track_id in self._tracks:
+                        self._tracks[track_id].add_cluster(cluster_obj)
+
+                good_clusters += 1
+
+
+    def build_clusters_time_slices(self, max_manhattan_dist=1) -> None:
+        ''' Construct clusters of hits which occur at the same time, in connected clusters of pads
+        
+        .. warning::
+            This will change the order of hits in the event
+        '''
+
+        ## Sort the hits in this track by the hit time
+        ## *WARNING* This *will* change the order of the hits inside the track object
+        self._hits.sort(key=lambda hit: hit[0])
+
+        hit_iter = iter(self._hits)
+        hit = next(hit_iter, None)
+        hits = []
+        cluster_time = hit[0]
+
+        while True:
+            
+            if hit is None:
+                break
+            
+            ## if we've hit a new time step, make the clusters then move on
+            if hit[0] != cluster_time:
+                
+                # Group Adjacent Coordinates
+                # Using product() + groupby() + list comprehension
+                man_tups = [sub for sub in product(hits, repeat = 2)
+                                                        if HATManhattan(*sub) <= max_manhattan_dist]
+                
+                res_dict = {ele: {ele} for ele in hits}
+                for tup1, tup2 in man_tups:
+                    for tup3 in res_dict[tup2]:
+                        res_dict[tup1] |= res_dict[tup3]
+                        res_dict[tup3] = res_dict[tup1]
+                
+                clusters = [[*next(val)] for key, val in groupby(
+                        sorted(res_dict.values(), key = id), id)]
+                
+                self._logger.debug("The found clusters: ")
+                for cluster_hits in clusters:
+                    self._logger.debug("  ", [f'({c[3]}, {c[4]}) ' for c in cluster_hits])
+                    cluster_obj = HATCluster(cluster_hits)
+                    self._clusters.append(cluster_obj)
+
+                    for track_id in cluster_obj.tracks:
+                        if track_id in self._tracks:
+                            self._tracks[track_id].add_cluster(cluster_obj)
+
+                ## reset stuff
+                cluster_time = hit[0]
+                hits = []
+                continue
+
+            ## otherwise we add the hit to the list of hits to consider
+            hits.append(hit)
+
+            hit = next(hit_iter, None)
+
+    def build_input_graph(self) -> Data:
 
         node_features = []
         node_positions = []
         edge_indices = [[],[]]
 
-        max_dist_sq = max_dist * max_dist
+        # If clusters haven't been build, use hits
+        if self._clusters is None:
+            clusters_or_hits = self._hits
+        else:
+            clusters_or_hits = self._clusters
 
         ## Build the node feature vectors
-        for hit in self._hits:
-            node_positions.append( [ hit[0], hit[1], hit[2]] )
-            node_features.append( [ hit[3] ] )
-
-        for hit0_id in range(len(self._hits)):
-            hit0 = self._hits[hit0_id]
-            
-            for hit1_id in range(len(self._hits)):
-                hit1 = self._hits[hit1_id]
-
-                dist_sq = (hit0[1] - hit1[1]) * (hit0[1] - hit1[1]) + (hit0[2] - hit1[2]) * (hit0[2] - hit1[2]) 
-
-                ## if the hits are closer than the max distance, connect them with an edge
-                if dist_sq < max_dist_sq:
-                    
-                    edge_indices[0].append(hit0[4])
-                    edge_indices[1].append(hit1[4])
+        for cluster in clusters_or_hits:
+            node_positions.append( [ cluster.t, cluster.y, cluster.z] )
+            node_features.append( [ cluster.charge ] )
 
         edge_index_tensor = torch.tensor(edge_indices)
         node_feature_tensor = torch.tensor(node_features)
         node_position_tensor = torch.tensor(node_positions)
 
-        return Data( edge_index = edge_index_tensor, node_attr = node_feature_tensor, pos = node_position_tensor )
+        data = Data( edge_index = edge_index_tensor, node_attr = node_feature_tensor, pos = node_position_tensor )
+
+        return data
+
+    def plot_event(self, event_id:int, path="") -> None:
+
+        plt.clf()
+
+        plt.subplot(211)
+
+        plt.xlim(-2800,-800)
+        plt.ylim(450, 1200)
+
+        plt.title("Hits")
+
+        for hit in self._hits:
+
+            colour = "ko"
+            plt.plot(hit.z, hit.y, colour, ms=0.001 * hit.charge)
+
+
+        for track in self._tracks.values():
+            for hit in track.get_hits():
+
+                colour = "ko"
+                if int(abs(track.get_pid()) == 13):
+                    colour = "bo"
+                elif int(abs(track.get_pid()) == 11):
+                    colour = "ro"
+
+                plt.plot(hit.z, hit.y, colour, ms=0.001 * hit.charge)
+
+
+        plt.subplot(212)
+
+        plt.xlim(-2800,-800)
+        plt.ylim(450, 1200)
+
+        plt.title("Clusters")
+
+        ## need to check if clusters have been made
+        clusters_or_hits = []
+        use_clusters = False
+        if self._clusters is None:
+            clusters_or_hits = self._hits
+        else:
+            clusters_or_hits = self._clusters
+            use_clusters = True
+
+        for cluster in clusters_or_hits:
+
+            if cluster.charge < 1000:
+                continue
+
+            colour = "ko"
+            plt.plot(cluster.z, cluster.y, colour, ms=0.001 * cluster.charge)
+
+
+        for track in self._tracks.values():
+
+            track_clusters_or_hits = []
+            if use_clusters:
+                track_clusters_or_hits = track.get_clusters()
+            else:
+                track_clusters_or_hits = track.get_hits()
+
+            for cluster in track_clusters_or_hits:
+
+                if cluster.charge < 1000:
+                    continue
+
+                colour = "ko"
+                if int(abs(track.get_pid()) == 13):
+                    colour = "bo"
+                elif int(abs(track.get_pid()) == 11):
+                    colour = "ro"
+
+                plt.plot(cluster.z, cluster.y, colour, ms=0.001 * cluster.charge)
+
+        plt.savefig(os.path.join(path, f'event_{event_id}.png'), dpi=500)
 
     def build_label_graph(self) -> Data:
         ''' Builds a "label graph" for this event. i.e. the target for the GNN
@@ -168,20 +458,45 @@ class Event:
 
         '''
 
+        self._logger.debug(f"Building label graph for event {self._id}")
+
+        # if clusters haven't been constructed, just use hits
+        use_clusters = False
+        clusters_or_hits = []
+        if self._clusters is None:
+            clusters_or_hits = self._hits
+        else:
+            clusters_or_hits = self._clusters
+            use_clusters = True
+
         ## Build the node position vectors
         node_positions = []
-        for hit in self._hits:
-            node_positions.append( [ hit[0], hit[1], hit[2]] )
+        for cluster in clusters_or_hits:
+            node_positions.append( [ cluster.t, cluster.y, cluster.z] )
         
         edge_labels = []
         edge_indices = [[],[]]
         
         for track in self._tracks.values():
 
-            ## assume hits are ordered by the time that they actually happened?
-            for hit0, hit1 in zip(track.get_hits()[1:], track.get_hits()[:-1]):
-                edge_indices[0].append(hit0[4])
-                edge_indices[1].append(hit1[4])
+            self._logger.debug(f"  track {track._id} has clusters:")
+
+            track_clusters_or_hits = []
+
+            if use_clusters:
+                track_clusters_or_hits = track.get_clusters()
+            else:
+                track_clusters_or_hits = track.get_hits()
+
+            ## Sort the clusters in this track by the cluster time
+            track_clusters_or_hits.sort(key=lambda cluster: cluster.t)
+
+            for cluster0, cluster1 in zip(track_clusters_or_hits[1:], track_clusters_or_hits[:-1]):
+
+                self._logger.debug(f"    t={cluster0.t}, y={cluster0.y}, z={cluster0.z}, tracks={cluster0.tracks}")
+
+                edge_indices[0].append(cluster0.id)
+                edge_indices[1].append(cluster1.id)
                 
                 ## one hot encoding for muonness or electronness
                 edge_labels.append(
@@ -195,24 +510,34 @@ class Event:
         edge_label_tensor = torch.tensor(edge_labels)
         node_position_tensor = torch.tensor(node_positions)
 
-        data =  Data( edge_index = edge_index_tensor, edge_attr = edge_label_tensor, pos = node_position_tensor )
+        data = Data( edge_index = edge_index_tensor, edge_attr = edge_label_tensor, pos = node_position_tensor )
 
-        data.num_nodes = len(self._hits)
+        data.num_nodes = len(clusters_or_hits)
 
         return data
 
 
 class HATDataMaker:
+    ''' Creates ML data files for the HAT from a ML TTree made witht the MLTTreeMaker app in ND280 detResponseSim 
+    '''
     
-    def __init__(self, filenames:list[str], processed_file_path:str):
+    def __init__(self, filenames:list[str], processed_file_path:str, start=None, stop=None, log_level:int=logging.INFO):
         # keep copies of the raw and processed file names
         self._raw_filenames:list[str] = list(filenames)
         self._processed_filenames:list[str] = []
 
         self._processed_file_path:str = processed_file_path
 
+        self._process_start:int = start
+        self._process_stop:int = stop
+
+        self._logger = logging.getLogger("HATDataMaker")
+        self._logger.setLevel(log_level)
+
     @property
     def raw_file_names(self) -> list[str]:
+        ''' The name of the raw input root files
+        '''
         return self._raw_filenames
 
     @property
@@ -220,9 +545,11 @@ class HATDataMaker:
         return self._processed_filenames
 
     def process(self) -> None:
+        ''' "process" the input raw root files and turn it into lovely machine learning input files
+        '''
         for file_name in self._raw_filenames:
             
-            print(f'Processing file {file_name}')
+            self._logger.info(f'Processing file {file_name}')
             
             with uproot.open(file_name) as file:
                 
@@ -230,42 +557,41 @@ class HATDataMaker:
                 file_hits = file["hatdigits"]
                 file_tracks = file["hattracks"]
 
-                print("Hit branches: ", file_hits.keys())
-                print("Track branches: ", file_tracks.keys())
+                self._logger.info(f"Hit branches:   {file_hits.keys()}")
+                self._logger.info(f"Track branches: {file_tracks.keys()}")
 
                 # get the track and hit info in a more useful format
-                track_df = file_tracks.arrays(
+                track_iterator = file_tracks.iterate(
                     ["event", "track", "pdg", "parent", "nhits"], 
-                    library="pd"
+                    library="pd",
+                    step_size = 1
                 )
-                hit_df = file_hits.arrays(
-                    ["event", "trkid", "time", "y", "z", "qmax", "tmax", "fwhm"], 
-                    library="pd"
+                hit_iterator = file_hits.iterate(
+                    ["event", "trkid", "time", "y", "z", "row", "col", "qmax", "tmax", "fwhm"], 
+                    library="pd",
+                    step_size = 1
                 )
-
-                print(hit_df)
-                print(track_df)
-                
-
-                ## for iterating through the above dataframes
-                track_iterator = track_df.iterrows()
-                hit_iterator = hit_df.iterrows()
 
                 ## initial values
                 event_id = 0
-                track = next(track_iterator, None)[1]
-                hit = next(hit_iterator, None)[1]
+                new_event_id = None
+                track = next(track_iterator, None)
+                hit = next(hit_iterator, None)
 
                 # assume that the last event ID tells us the number of events
                 n_events = file_tracks["event"].array()[-1]
-                print (f'Has {n_events} events')
+                self._logger.info(f'Has {n_events} events')
                 
-                while event_id < 10: #True:
+                while True:
                     if (hit is None) and (track is None):
                         break
 
+
+                    if((self._process_stop is not None) & (event_id > self._process_stop)):
+                        break
+
                     ## make the event
-                    event = Event(event_id)
+                    event = Event(event_id, logger=self._logger)
 
                     ## print out progress bar every few events
                     if(event_id % (int(n_events/100)) == 0 or event_id == n_events - 1):
@@ -275,68 +601,90 @@ class HATDataMaker:
                     ## first fill up the structure of the event
                     while True:
                         
-                        event.add_track(
-                            Track(
-                                track["track"], 
-                                track["pdg"],
-                                track["parent"]
+                        if((self._process_start is not None) & (event_id >= self._process_start)):
+                            event.add_track(
+                                Track(
+                                    track["track"].values[0], 
+                                    track["pdg"].values[0],
+                                    track["parent"].values[0]
+                                )
                             )
-                        )
                         
-                        track = next(track_iterator)[1]
+                        track = next(track_iterator)
                         
                         ## check if we've moved to a new event
-                        if track["event"] != event_id:
+                        if track["event"].values[0] != event_id:
                             break
 
                     ## now fill those tracks with hits
                     hit_id = 0
 
                     while True:
-                        
-                        event.add_hit(
-                            Hit(
-                                hit["time"], 
-                                hit["y"], 
-                                hit["z"], 
-                                hit["qmax"],
-                                hit_id
-                            ), 
-                            hit["trkid"]
-                        )
-                        
-                        hit = next(hit_iterator)[1]
+
+                        if((self._process_start is not None) & (event_id >= self._process_start)):
+                            event.add_hit(
+                                Hit(
+                                    hit["time"].values[0], 
+                                    hit["y"].values[0], 
+                                    hit["z"].values[0], 
+                                    hit["row"].values[0],
+                                    hit["col"].values[0],
+                                    hit["qmax"].values[0],
+                                    hit_id,
+                                    hit["trkid"].values[0].to_list()
+                                ), 
+                                hit["trkid"].values[0].to_list()
+                            )
+                            
+                        hit = next(hit_iterator)
 
                         ## check if we've moved to a new event
-                        if hit["event"] != event_id:
+                        if hit["event"].values[0] != event_id:
                             ## should move to next event
-                            event_id = hit["event"]
+                            new_event_id = hit["event"].values[0]
                             break
 
-                        self._save_graphs(event, event_id)
                         hit_id += 1
+                
+                    if((self._process_start is not None) & (event_id >= self._process_start)):
+                        event.build_clusters(0)
+                        event.print(self._logger.debug)
+                        event.plot_event(event_id)
+                        self._save_graphs(event, event_id, make_plots=False)
 
-    def _save_graphs(self, event:Event, event_id:int) -> None:
-        
-        data_inputs = event.build_input_graph(250)
+                    event_id = new_event_id
 
-        draw_options = {
-            'node_color': 'black',
-            'node_size': 20,
-            'width': 1,
-        }
+    def _save_graphs(self, event:Event, event_id:int, make_plots=False) -> None:
 
-        g = tg_utils.to_networkx(data_inputs, to_undirected=True, remove_self_loops=True)
-        nx.draw(g, **draw_options)
-        plt.savefig( os.path.join(self._processed_file_path, f"data_graph_{event_id}.png") )
-        plt.clf
+        data_inputs = RadiusGraph(100.0)(event.build_input_graph())
         
         data_labels = event.build_label_graph()
         
-        g = tg_utils.to_networkx( data_labels, to_undirected=True, remove_self_loops=True )
-        nx.draw(g, **draw_options)
-        plt.savefig( os.path.join(self._processed_file_path, f"data_label_graph{event_id}.png") )
+        data_file_name = os.path.join(self._processed_file_path, f'data_HAT_{event_id}.pt')
+        label_file_name = os.path.join(self._processed_file_path, f'labels_HAT_{event_id}.pt')
         
-        torch.save(data_labels, os.path.join(self._processed_file_path, f'labels_HAT_{event_id}.pt'))
-        torch.save(data_inputs, os.path.join(self._processed_file_path, f'data_HAT_{event_id}.pt'))
+        torch.save(data_inputs, data_file_name)
+        torch.save(data_labels, label_file_name)
+
+        self.processed_file_names.append(data_file_name)
+        self.processed_file_names.append(label_file_name)
+
+        # optionally save some plots of the graphs
+        if make_plots:
+
+            draw_options = {
+                'node_color': 'black',
+                'node_size': 20,
+                'width': 1,
+            }
+            
+            g = tg_utils.to_networkx( data_labels, to_undirected=True, remove_self_loops=True )
+            plt.clf()
+            nx.draw(g, data_labels.pos[:, 1:], **draw_options)
+            plt.savefig( os.path.join(self._processed_file_path, f"data_label_graph{event_id}.png") )
+
+            g = tg_utils.to_networkx(data_inputs, to_undirected=True, remove_self_loops=True)
+            plt.clf()
+            nx.draw(g, data_inputs.pos[:, 1:], **draw_options)
+            plt.savefig( os.path.join(self._processed_file_path, f"data_graph_{event_id}.png") )
         
