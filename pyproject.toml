@@ -30,3 +30,7 @@ graph = [
   "torch-cluster",
   "torch_geometric"
 ]
+
+[project.scripts]
+
+make-dataset = "nd280mlreco:app.makedataset.run"
