@@ -10,7 +10,6 @@ import numpy as np
 
 import torch
 from torch_geometric.data import Dataset, Data
-from torch_geometric.transforms import RadiusGraph
 from torch_geometric.explain import Explanation
 from torch_geometric import utils as tg_utils
 
@@ -366,7 +365,15 @@ class Event:
         node_feature_tensor = torch.tensor(node_features)
         node_position_tensor = torch.tensor(node_positions)
 
-        data = Data( edge_index = edge_index_tensor, node_attr = node_feature_tensor, pos = node_position_tensor )
+        label_graph = self.build_label_graph()
+
+        data = Data( 
+            edge_index = edge_index_tensor, 
+            x = node_feature_tensor, 
+            pos = node_position_tensor, 
+            edge_label_index = label_graph.edge_index, 
+            y = label_graph.x 
+        )
 
         return data
 
@@ -417,9 +424,6 @@ class Event:
 
         for cluster in clusters_or_hits:
 
-            if cluster.charge < 1000:
-                continue
-
             colour = "ko"
             plt.plot(cluster.z, cluster.y, colour, ms=0.001 * cluster.charge)
 
@@ -433,9 +437,6 @@ class Event:
                 track_clusters_or_hits = track.get_hits()
 
             for cluster in track_clusters_or_hits:
-
-                if cluster.charge < 1000:
-                    continue
 
                 colour = "ko"
                 if int(abs(track.get_pid()) == 13):
@@ -471,8 +472,16 @@ class Event:
 
         ## Build the node position vectors
         node_positions = []
+        node_labels = []
         for cluster in clusters_or_hits:
             node_positions.append( [ cluster.t, cluster.y, cluster.z] )
+            
+            node_labels.append(
+                    [
+                        0,
+                        0
+                    ]
+                )
         
         edge_labels = []
         edge_indices = [[],[]]
@@ -491,26 +500,21 @@ class Event:
             ## Sort the clusters in this track by the cluster time
             track_clusters_or_hits.sort(key=lambda cluster: cluster.t)
 
-            for cluster0, cluster1 in zip(track_clusters_or_hits[1:], track_clusters_or_hits[:-1]):
+            for cluster in track_clusters_or_hits:
+                node_labels[cluster.id] = [
+                    int(abs(track.get_pid()) == 13 or node_labels[cluster.id][0]) ,
+                    int(abs(track.get_pid()) == 11 or node_labels[cluster.id][1])
+                ]
 
-                self._logger.debug(f"    t={cluster0.t}, y={cluster0.y}, z={cluster0.z}, tracks={cluster0.tracks}")
-
-                edge_indices[0].append(cluster0.id)
-                edge_indices[1].append(cluster1.id)
-                
-                ## one hot encoding for muonness or electronness
-                edge_labels.append(
-                    [
-                        int(abs(track.get_pid()) == 13),
-                        int(abs(track.get_pid()) == 11)
-                    ]
-                )
-
+                edge_indices[0].append(cluster.id)
+                edge_indices[1].append(cluster.id)
+        
         edge_index_tensor = torch.tensor(edge_indices)
-        edge_label_tensor = torch.tensor(edge_labels)
+        #edge_label_tensor = torch.tensor(edge_labels)
+        node_label_tensor = torch.tensor(node_labels)
         node_position_tensor = torch.tensor(node_positions)
 
-        data = Data( edge_index = edge_index_tensor, edge_attr = edge_label_tensor, pos = node_position_tensor )
+        data = Data( edge_index = edge_index_tensor, pos = node_position_tensor, x = node_label_tensor )
 
         data.num_nodes = len(clusters_or_hits)
 
@@ -586,7 +590,6 @@ class HATDataMaker:
                     if (hit is None) and (track is None):
                         break
 
-
                     if((self._process_stop is not None) & (event_id > self._process_stop)):
                         break
 
@@ -649,25 +652,19 @@ class HATDataMaker:
                     if((self._process_start is not None) & (event_id >= self._process_start)):
                         event.build_clusters(0)
                         event.print(self._logger.debug)
-                        event.plot_event(event_id)
                         self._save_graphs(event, event_id, make_plots=False)
 
                     event_id = new_event_id
 
     def _save_graphs(self, event:Event, event_id:int, make_plots=False) -> None:
 
-        data_inputs = RadiusGraph(100.0)(event.build_input_graph())
-        
-        data_labels = event.build_label_graph()
+        data_inputs = event.build_input_graph()
         
         data_file_name = os.path.join(self._processed_file_path, f'data_HAT_{event_id}.pt')
-        label_file_name = os.path.join(self._processed_file_path, f'labels_HAT_{event_id}.pt')
         
         torch.save(data_inputs, data_file_name)
-        torch.save(data_labels, label_file_name)
 
         self.processed_file_names.append(data_file_name)
-        self.processed_file_names.append(label_file_name)
 
         # optionally save some plots of the graphs
         if make_plots:
@@ -683,6 +680,9 @@ class HATDataMaker:
             nx.draw(g, data_labels.pos[:, 1:], **draw_options)
             plt.savefig( os.path.join(self._processed_file_path, f"data_label_graph{event_id}.png") )
 
+            ## need to separately build the label graph here to plot it    
+            data_labels = event.build_label_graph()
+    
             g = tg_utils.to_networkx(data_inputs, to_undirected=True, remove_self_loops=True)
             plt.clf()
             nx.draw(g, data_inputs.pos[:, 1:], **draw_options)
