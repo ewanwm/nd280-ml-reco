@@ -613,7 +613,7 @@ class HATDataMaker:
                                 )
                             )
                         
-                        track = next(track_iterator)
+                        track = next(track_iterator, None)
                         
                         ## check if we've moved to a new event
                         if track["event"].values[0] != event_id:
@@ -639,7 +639,7 @@ class HATDataMaker:
                                 hit["trkid"].values[0].to_list()
                             )
                             
-                        hit = next(hit_iterator)
+                        hit = next(hit_iterator, None)
 
                         ## check if we've moved to a new event
                         if hit["event"].values[0] != event_id:
