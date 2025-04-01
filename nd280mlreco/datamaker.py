@@ -616,7 +616,7 @@ class HATDataMaker:
                         track = next(track_iterator, None)
                         
                         ## check if we've moved to a new event
-                        if track["event"].values[0] != event_id:
+                        if track["event"].values[0] != event_id or track is None:
                             break
 
                     ## now fill those tracks with hits
@@ -642,7 +642,7 @@ class HATDataMaker:
                         hit = next(hit_iterator, None)
 
                         ## check if we've moved to a new event
-                        if hit["event"].values[0] != event_id:
+                        if hit["event"].values[0] != event_id or hit is None:
                             ## should move to next event
                             new_event_id = hit["event"].values[0]
                             break
