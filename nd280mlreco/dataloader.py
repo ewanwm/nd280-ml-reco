@@ -5,6 +5,11 @@ import os
 import torch
 from torch_geometric import data as tg_data
 
+## need to tell torch that some torch_geometric classes are safe to load
+torch.serialization.add_safe_globals([tg_data.data.DataEdgeAttr])
+torch.serialization.add_safe_globals([tg_data.data.DataTensorAttr])
+torch.serialization.add_safe_globals([tg_data.storage.GlobalStorage])
+
 class HATDataset(tg_data.Dataset):
 
     def __init__(
@@ -35,7 +40,7 @@ class HATDataset(tg_data.Dataset):
         idx = 0
         for raw_path in self.raw_filenames:
             # Read data from `raw_path`.
-            data = torch.load(raw_path)
+            data = torch.load(raw_path, weights_only=True)
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
@@ -50,6 +55,6 @@ class HATDataset(tg_data.Dataset):
         return len(self.processed_filenames)
 
     def get(self, idx):
-        data = torch.load(os.path.join(self.root, "processed", self.processed_file_names[idx]))
+        data = torch.load(os.path.join(self.root, "processed", self.processed_file_names[idx]), weights_only=True)
         return data
 
