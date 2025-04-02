@@ -33,8 +33,8 @@ def run():
         filenames = [args.input_file],
         processed_file_path = args.output_dir,
         pdg_classes = ast.literal_eval(args.class_pdgs),
-        class_colours = ast.literal_eval(args.class_colours),
-        class_names = ast.literal_eval(args.class_names),
+        class_colours = ast.literal_eval(args.class_colours) if args.class_colours is not None else None,
+        class_names = ast.literal_eval(args.class_names) if args.class_names is not None else None,
         start = args.start_index,
         stop = args.stop_index,
         log_level=logging.INFO
