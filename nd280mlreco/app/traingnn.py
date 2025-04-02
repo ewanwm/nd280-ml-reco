@@ -380,6 +380,8 @@ def run():
     input_files = args.input_files[0]
     input_files.sort()
 
+    ## check what device is available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if not os.path.exists( os.path.join(args.output_dir, f"processed_files/") ):
         os.makedirs(os.path.join(args.output_dir, f"processed_files/") )
@@ -400,15 +402,14 @@ def run():
 
 
     model = build_pointnet_model(1, args.num_classes, 150, 3)
+    model.to(device)
     optimizer = Adam(model.parameters(), lr = 0.001)
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size)
     val_loader = DataLoader(validation_set)
 
-
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     writer = SummaryWriter(log_dir = 'runs/GCN_trainer_{}'.format(timestamp))
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     start_epoch = -1
 
@@ -450,9 +451,9 @@ def run():
         VAL_EXAMPLE_INDEX = 0
 
         outputs = model(
-            validation_set[VAL_EXAMPLE_INDEX].x.to(torch.float32), 
-            validation_set[VAL_EXAMPLE_INDEX].pos.to(torch.float32), 
-            validation_set[VAL_EXAMPLE_INDEX].edge_index
+            validation_set[VAL_EXAMPLE_INDEX].x.to(torch.float32).to(device), 
+            validation_set[VAL_EXAMPLE_INDEX].pos.to(torch.float32).to(device), 
+            validation_set[VAL_EXAMPLE_INDEX].edge_index.to(device)
         )
 
         plot_prediction(validation_set[VAL_EXAMPLE_INDEX], outputs)
