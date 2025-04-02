@@ -362,21 +362,20 @@ def run():
     parser.add_argument("--input-files", "-i", required=True, type=str, action="append", nargs='+', help="The processed gnn files that make up the dataset")
     parser.add_argument("--output-dir", "-o", required=True, type=str, help="The directory to output anything that falls out of the training process")
     parser.add_argument("--epochs", "-e", required=True, type=int, help="The number of epochs to train for")
+    parser.add_argument("--num_classes", "-c", required=True, type=int, help="The hit classes")
     parser.add_argument("--start-from", "-s", required=False, type=str, default=None, help="Checkpoint to start the training from")
     parser.add_argument("--print-freq", "-p", required=False, type=int, default=None, help="print loss and validation info every n batches when training")
     parser.add_argument("--save-examples", required=False, type=bool, default=False, help="Whether or not to save some example plots")
     parser.add_argument("--val-split", "-v", required=False, type=float, default=0.7, help="The dat:validation split to use when dividing the dataset")
+    parser.add_argument("--batch-size", "-b", required=False, type=int, default=64, help="The dat:validation split to use when dividing the dataset")
     parser.add_argument("--max-radius", "-r", required=False, type=float, default=50.0, help="The radius to use when performing the ball query when building the graph dataset")
 
     args = parser.parse_args()
 
     EXAMPLE_INDEX = 0
     
-    print( args.input_files[0])
     input_files = args.input_files[0]
     input_files.sort()
-
-    print(input_files)
 
     ## make the datasets
     train_set, validation_set = make_datasets(input_files, args.max_radius, args.val_split)
@@ -393,10 +392,10 @@ def run():
         plt.savefig( os.path.join(args.output_dir, f"label_graph_example.png") )
 
 
-    model = build_pointnet_model(1, 4, 150, 3)
+    model = build_pointnet_model(1, args.num_classes, 150, 3)
     optimizer = Adam(model.parameters(), lr = 0.001)
 
-    train_loader = DataLoader(train_set, batch_size=64)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size)
     val_loader = DataLoader(validation_set)
 
 
