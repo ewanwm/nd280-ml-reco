@@ -33,6 +33,7 @@ import argparse
 
 def make_datasets(
         input_files:typing.List[str],
+        processed_dir:str,
         max_radius:float,
         validation_split:float = 0.7,
     ) -> typing.Tuple[dataloader.HATDataset]:
@@ -40,6 +41,8 @@ def make_datasets(
 
     :param input_files: The list of files to process into a dataset
     :type input_files: typing.List[str]
+    :param processed_dir: The directory to save processed files to
+    :type input_files: str
     :param max_radius: The radius to use for the ball query when building the input graph (i.e. the radius within which nodes will be connected to each other)
     :type max_radius: float
     :param validation_split: The data:validation ratio, defaults to 0.7
@@ -76,7 +79,7 @@ def make_datasets(
     train_set = dataloader.HATDataset(
         raw_filenames = train_files, 
         processed_file_names = processed_train_files,
-        root = "/home/ewan/ND280-ML/nd280-ml-reco/processed_files/train",
+        root = os.path.join(processed_dir, "train"),
         pre_transform = RadiusGraph(max_radius)
         )
 
@@ -86,7 +89,7 @@ def make_datasets(
     validation_set = dataloader.HATDataset(
         raw_filenames = validation_files, 
         processed_file_names = processed_validation_files,
-        root = "/home/ewan/ND280-ML/nd280-ml-reco/processed_files/validation",
+        root = os.path.join(processed_dir, "validation"),
         pre_transform = RadiusGraph(max_radius)
         )
 
@@ -377,8 +380,12 @@ def run():
     input_files = args.input_files[0]
     input_files.sort()
 
+
+    if not os.path.exists( os.path.join(args.output_dir, f"processed_files/") ):
+        os.makedirs(os.path.join(args.output_dir, f"processed_files/") )
+
     ## make the datasets
-    train_set, validation_set = make_datasets(input_files, args.max_radius, args.val_split)
+    train_set, validation_set = make_datasets(input_files, os.path.join(args.output_dir, "processed_files"), args.max_radius, args.val_split)
 
 
     if args.save_examples:
