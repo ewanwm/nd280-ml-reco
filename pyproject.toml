@@ -9,7 +9,9 @@ dependencies = [
   "pdg",
   "pandas",
   "awkward-pandas",
-  "torch<=2.5" #must be <=2.5 as this is what's supported by torch-cluster
+  "torch<=2.5", #must be <=2.5 as this is what's supported by torch-cluster
+  "torcheval",
+  "tensorboard",
 ]
 
 authors = [
