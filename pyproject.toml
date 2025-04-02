@@ -34,3 +34,4 @@ graph = [
 [project.scripts]
 
 make-dataset = "nd280mlreco:app.makedataset.run"
+train-gnn = "nd280mlreco:app.traingnn.run"
