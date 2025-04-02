@@ -15,6 +15,7 @@ from torch_geometric import utils as tg_utils
 
 import time
 import networkx as nx
+from matplotlib import colors as plt_colors
 import matplotlib.pyplot as plt
 
 from itertools import groupby, product
@@ -344,7 +345,7 @@ class Event:
 
             hit = next(hit_iter, None)
 
-    def build_input_graph(self) -> Data:
+    def build_input_graph(self, pdg_classes) -> Data:
 
         node_features = []
         node_positions = []
@@ -365,7 +366,7 @@ class Event:
         node_feature_tensor = torch.tensor(node_features)
         node_position_tensor = torch.tensor(node_positions)
 
-        label_graph = self.build_label_graph()
+        label_graph = self.build_label_graph(pdg_classes)
 
         data = Data( 
             edge_index = edge_index_tensor, 
@@ -377,36 +378,52 @@ class Event:
 
         return data
 
-    def plot_event(self, event_id:int, path="") -> None:
+    def plot_hits(
+            self, 
+            event_id:int, 
+            class_pdgs:typing.List[typing.List[int]], 
+            class_colours:typing.List[str]=None, 
+            class_names:typing.List[str]=None,
+            path="", 
+        ) -> None:
 
         plt.clf()
-
-        plt.subplot(211)
 
         plt.xlim(-2800,-800)
         plt.ylim(450, 1200)
 
         plt.title("Hits")
 
-        for hit in self._hits:
-
-            colour = "ko"
-            plt.plot(hit.z, hit.y, colour, ms=0.001 * hit.charge)
-
+        colour_list = [np.zeros(3) for _ in self._hits]
 
         for track in self._tracks.values():
             for hit in track.get_hits():
 
-                colour = "ko"
-                if int(abs(track.get_pid()) == 13):
-                    colour = "bo"
-                elif int(abs(track.get_pid()) == 11):
-                    colour = "ro"
+                if class_colours is not None:
+                    for i, class_pdg in enumerate(class_pdgs):
+                        if (track.get_pid() in class_pdg):
+                            colour_list[hit.id] += np.array(plt_colors.to_rgb(class_colours[i]))
 
-                plt.plot(hit.z, hit.y, colour, ms=0.001 * hit.charge)
+        for i, hit in enumerate(self._hits):
+
+            if not np.all(colour_list[i] == 0.0):
+                colour_list[i] = colour_list[i] / np.max(colour_list[i])
+
+            plt.plot(hit.z, hit.y, c=colour_list[i], marker="o", ms=0.001 * hit.charge)
+
+        plt.savefig(os.path.join(path, f'event_{event_id}_hits.png'), dpi=500)
 
 
-        plt.subplot(212)
+    def plot_clusters(
+            self, 
+            event_id:int, 
+            class_pdgs:typing.List[typing.List[int]], 
+            class_colours:typing.List[str]=None, 
+            class_names:typing.List[str]=None,
+            path="", 
+        ) -> None:
+
+        plt.clf()
 
         plt.xlim(-2800,-800)
         plt.ylim(450, 1200)
@@ -422,11 +439,8 @@ class Event:
             clusters_or_hits = self._clusters
             use_clusters = True
 
-        for cluster in clusters_or_hits:
 
-            colour = "ko"
-            plt.plot(cluster.z, cluster.y, colour, ms=0.001 * cluster.charge)
-
+        colour_list = [np.zeros(3) for _ in clusters_or_hits]
 
         for track in self._tracks.values():
 
@@ -436,19 +450,25 @@ class Event:
             else:
                 track_clusters_or_hits = track.get_hits()
 
-            for cluster in track_clusters_or_hits:
+            for hit in track_clusters_or_hits:
 
-                colour = "ko"
-                if int(abs(track.get_pid()) == 13):
-                    colour = "bo"
-                elif int(abs(track.get_pid()) == 11):
-                    colour = "ro"
+                if class_colours is not None:
+                    for i, class_pdg in enumerate(class_pdgs):
+                        if (track.get_pid() in class_pdg):
+                            colour_list[hit.id] += np.array(plt_colors.to_rgb(class_colours[i]))
 
-                plt.plot(cluster.z, cluster.y, colour, ms=0.001 * cluster.charge)
+        for i, hit in enumerate(clusters_or_hits):
 
-        plt.savefig(os.path.join(path, f'event_{event_id}.png'), dpi=500)
+            if not np.all(colour_list[i] == 0.0):
+                colour_list[i] = colour_list[i] / np.max(colour_list[i])
 
-    def build_label_graph(self) -> Data:
+            plt.plot(hit.z, hit.y, c=colour_list[i], marker="o", ms=0.001 * hit.charge)
+
+        plt.savefig(os.path.join(path, f'event_{event_id}_clusters.png'), dpi=500)
+
+
+
+    def build_label_graph(self, pdg_classes:typing.List[typing.List[int]]) -> Data:
         ''' Builds a "label graph" for this event. i.e. the target for the GNN
 
         The truth information is encoded in the graph as follows:
@@ -477,11 +497,8 @@ class Event:
             node_positions.append( [ cluster.t, cluster.y, cluster.z] )
             
             node_labels.append(
-                    [
-                        0,
-                        0
-                    ]
-                )
+                np.zeros(len(pdg_classes))
+            )
         
         edge_labels = []
         edge_indices = [[],[]]
@@ -501,17 +518,18 @@ class Event:
             track_clusters_or_hits.sort(key=lambda cluster: cluster.t)
 
             for cluster in track_clusters_or_hits:
-                node_labels[cluster.id] = [
-                    int(abs(track.get_pid()) == 13 or node_labels[cluster.id][0]) ,
-                    int(abs(track.get_pid()) == 11 or node_labels[cluster.id][1])
-                ]
+
+                ## check if the PID is in the list of Ids for any of the classes
+                for i, pdg_class in enumerate(pdg_classes):
+                    if track.get_pid() in pdg_class:
+                        node_labels[cluster.id][i] = 1
 
                 edge_indices[0].append(cluster.id)
                 edge_indices[1].append(cluster.id)
         
         edge_index_tensor = torch.tensor(edge_indices)
         #edge_label_tensor = torch.tensor(edge_labels)
-        node_label_tensor = torch.tensor(node_labels)
+        node_label_tensor = torch.tensor(np.array(node_labels))
         node_position_tensor = torch.tensor(node_positions)
 
         data = Data( edge_index = edge_index_tensor, pos = node_position_tensor, x = node_label_tensor )
@@ -524,8 +542,37 @@ class Event:
 class HATDataMaker:
     ''' Creates ML data files for the HAT from a ML TTree made witht the MLTTreeMaker app in ND280 detResponseSim 
     '''
-    
-    def __init__(self, filenames:list[str], processed_file_path:str, start=None, stop=None, log_level:int=logging.INFO):
+        
+    def __init__(
+            self, 
+            filenames:list[str], 
+            processed_file_path:str, 
+            pdg_classes:typing.List[typing.List[int]],
+            class_names:typing.List[str]=None,
+            class_colours:typing.List[str]=None,
+            start:int=None,
+            stop:int=None,
+            log_level:int=logging.INFO
+        ):
+        """ Constructor
+        :param filenames: The names of the input files to be processed into a dataset
+        :type filenames: List[str]
+        :param processed_file_path: The path to save the files of the processed dataset to
+        :type processed_file_path: str
+        :param pdg_classes: The PDG IDs that make up each hit "class" in the dataset, can specify multiple IDs for a single class.
+        :type pdg_classes: typing.List[typing.List[int]]
+        :param class_names: Names of each class, defaults to None
+        :type class_names: typing.List[str], optional
+        :param class_colours: Colours to use when making plots of events, defaults to None
+        :type class_colours: typing.List[str], optional
+        :param start: The event ID of the event to start from. If none, will start at the first entry, defaults to None
+        :type start: int, optional
+        :param stop: The event ID of the event to stop at. If none, will stop at the last entry, defaults to None
+        :type stop: int, optional
+        :param log_level: verbosity level of the logger, defaults to logging.INFO
+        :type log_level: int, optional
+        """
+
         # keep copies of the raw and processed file names
         self._raw_filenames:list[str] = list(filenames)
         self._processed_filenames:list[str] = []
@@ -537,6 +584,17 @@ class HATDataMaker:
 
         self._logger = logging.getLogger("HATDataMaker")
         self._logger.setLevel(log_level)
+
+        self._pdg_classes = pdg_classes
+
+        ## check compatibility of optional labels
+        if class_names is not None:
+            assert(len(class_names) == len(pdg_classes))
+        if class_colours is not None:
+            assert(len(class_colours) == len(pdg_classes))
+
+        self._class_names = class_names
+        self._class_colours = class_colours
 
     @property
     def raw_file_names(self) -> list[str]:
@@ -652,13 +710,14 @@ class HATDataMaker:
                     if((self._process_start is not None) & (event_id >= self._process_start)):
                         event.build_clusters(0)
                         event.print(self._logger.debug)
+                        #event.plot_hits(event_id, class_pdgs=self._pdg_classes, class_colours=self._class_colours, class_names=self._class_names)
                         self._save_graphs(event, event_id, make_plots=False)
 
                     event_id = new_event_id
 
     def _save_graphs(self, event:Event, event_id:int, make_plots=False) -> None:
 
-        data_inputs = event.build_input_graph()
+        data_inputs = event.build_input_graph(self._pdg_classes)
         
         data_file_name = os.path.join(self._processed_file_path, f'data_HAT_{event_id}.pt')
         
