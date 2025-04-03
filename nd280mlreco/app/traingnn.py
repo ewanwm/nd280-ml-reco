@@ -361,11 +361,15 @@ def validate_one_epoch(
 
 def run():
 
+    EXAMPLE_INDEX = 0
+    
     parser = argparse.ArgumentParser(description="Train a graph neural network to classify hits in a HAT dataset.")
-    parser.add_argument("--input-files", "-i", required=True, type=str, action="append", nargs='+', help="The processed gnn files that make up the dataset")
+    parser.add_argument("--input-files", "-i", required=False, type=str, action="append", nargs='+', default=None, help="The processed gnn files that make up the dataset")
+    parser.add_argument("--input-regex", "-ir", required=False, type=str, default=None, help="Specify a regex to match with filenames to get input files to make up the dataset")
     parser.add_argument("--output-dir", "-o", required=True, type=str, help="The directory to output anything that falls out of the training process")
     parser.add_argument("--epochs", "-e", required=True, type=int, help="The number of epochs to train for")
     parser.add_argument("--num_classes", "-c", required=True, type=int, help="The hit classes")
+    parser.add_argument("--learning-rate", "-lr", required=False, type=float, default=0.001, help="The learning rate to use when training the model")
     parser.add_argument("--start-from", "-s", required=False, type=str, default=None, help="Checkpoint to start the training from")
     parser.add_argument("--print-freq", "-p", required=False, type=int, default=None, help="print loss and validation info every n batches when training")
     parser.add_argument("--save-examples", required=False, type=bool, default=False, help="Whether or not to save some example plots")
@@ -375,9 +379,20 @@ def run():
 
     args = parser.parse_args()
 
-    EXAMPLE_INDEX = 0
-    
-    input_files = args.input_files[0]
+    ## check that at least one way of getting input files was specified
+    if (
+        (args.input_regex is None) +
+        (args.input_files is None)
+        )!= 1:
+        
+        raise ValueError("Need to specify one (and only one) of --input-files, --input-regex to tell me where to find input files")
+
+    input_files =[]
+    if args.input_files is not None:
+        input_files = args.input_files[0]
+    elif args.input_regex is not None:
+        input_files = glob.glob(args.input_regex)
+        
     input_files.sort()
 
     ## check what device is available
