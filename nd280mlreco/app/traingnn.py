@@ -305,6 +305,7 @@ def train_one_epoch(
     if tb_writer is not None:
         tb_writer.add_scalar('Loss/train', last_loss, tb_x)
         tb_writer.add_scalar('binary_accuracy/train', bin_accuracy.compute(), tb_x)
+        tb_writer.add_scalar('learning_rate', optimizer.defaults["lr"], tb_x)
 
     return last_loss 
 
@@ -418,7 +419,7 @@ def run():
 
     model = build_pointnet_model(1, args.num_classes, 150, 3)
     model.to(device)
-    optimizer = Adam(model.parameters(), lr = 0.001)
+    optimizer = Adam(model.parameters(), lr = args.learning_rate)
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size)
     val_loader = DataLoader(validation_set)
