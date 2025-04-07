@@ -9,7 +9,7 @@ from nd280mlreco import dataloader
 
 ## torch imports
 import torch
-from torch.nn import Linear, ReLU, Sigmoid
+from torch.nn import Linear, ReLU, Sigmoid, Dropout
 from torch_geometric.nn import Sequential, GCNConv
 from torch.optim import Adam
 from torch.nn import MSELoss, CrossEntropyLoss
@@ -176,7 +176,7 @@ def plot_prediction(data:dataloader.HATDataset, logits, thresh:float = 0.5):
     nx.draw(g, data.pos[:, :-1], node_size = data.x / 20.0, width = 1, node_color = node_colours)
 
 
-def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_layers:int) -> torch.nn.Module:
+def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_layers:int, dropout_frac=0.5) -> torch.nn.Module:
     """ Construct a pointnet++ model (largely based on https://pytorch-geometric.readthedocs.io/en/latest/tutorial/point_cloud.html?highlight=pointnet)
 
     :param n_features: number of input features in each node of the input graph
@@ -193,20 +193,27 @@ def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_la
 
     local_nn_0 = Sequential("x",
                     [(Linear(n_features + 3, internal_nodes), "x -> x"),
-                    ReLU(),
-                    Linear(internal_nodes, internal_nodes)],
+                    ReLU(inplace=True),
+                    Linear(internal_nodes, internal_nodes),
+                    ReLU(inplace=True)]
                 )
 
     local_nn_1 = Sequential("x",
                     [(Linear(internal_nodes+3, internal_nodes), "x -> x"),
-                    ReLU(),
-                    Linear(internal_nodes, internal_nodes)],
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True),
+                    Linear(internal_nodes, internal_nodes),
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True)]
                 )
 
     global_nn = Sequential("x",
                     [(Linear(internal_nodes, internal_nodes), "x -> x"),
-                    ReLU(),
-                    Linear(internal_nodes, internal_nodes)],
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True),
+                    Linear(internal_nodes, internal_nodes),
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True)]
                 )
 
     layers = [ 
@@ -223,8 +230,7 @@ def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_la
             ), 'x, pos, edge_index -> x'),
 
             *layers,
-
-            (ReLU(inplace=True), "x -> x"),
+            
             (Linear(internal_nodes, n_classes), "x -> x"),
             (Sigmoid(), "x -> x")
         ]
@@ -283,8 +289,8 @@ def train_one_epoch(
         outputs = model(feat, pos, data.edge_index)
 
         # Compute the loss and its gradients
-        loss = CrossEntropyLoss()(outputs, data.y.to(torch.float32))
-        bin_accuracy.update(outputs.flatten(), data.y.to(torch.float32).flatten())
+        loss = CrossEntropyLoss()(outputs, data.y[:,:2].to(torch.float32))
+        bin_accuracy.update(outputs.flatten(), data.y[:,:2].to(torch.float32).flatten())
         loss.backward()
 
         # Adjust learning weights
@@ -344,8 +350,8 @@ def validate_one_epoch(
         outputs = model(data_val.x.to(torch.float32) / 1000.0, data_val.pos.to(torch.float32) / 2500.0, data_val.edge_index)
 
         # Compute the loss and its gradients
-        loss = CrossEntropyLoss()(outputs, data_val.y.to(torch.float32))
-        bin_accuracy.update(outputs.flatten(), data_val.y.to(torch.float32).flatten())
+        loss = CrossEntropyLoss()(outputs, data_val.y[:,:2].to(torch.float32))
+        bin_accuracy.update(outputs.flatten(), data_val.y[:,:2].to(torch.float32).flatten())
 
         # Gather data and report
         running_loss += loss.item()
@@ -377,6 +383,9 @@ def run():
     parser.add_argument("--val-split", "-v", required=False, type=float, default=0.7, help="The dat:validation split to use when dividing the dataset")
     parser.add_argument("--batch-size", "-b", required=False, type=int, default=64, help="The dat:validation split to use when dividing the dataset")
     parser.add_argument("--max-radius", "-r", required=False, type=float, default=50.0, help="The radius to use when performing the ball query when building the graph dataset")
+    parser.add_argument("--dropout-frac", required=False, type=float, default=0.5, help="The dropout fraction to use when training the model")
+    parser.add_argument("--model-width", required=False, type=int, default=20, help="The width of the pointnet internal layers")
+    parser.add_argument("--model-depth", required=False, type=int, default=2, help="The number of pointnet layers")
 
     args = parser.parse_args()
 
@@ -417,7 +426,7 @@ def run():
         plt.savefig( os.path.join(args.output_dir, f"label_graph_example.png") )
 
 
-    model = build_pointnet_model(1, args.num_classes, 150, 3)
+    model = build_pointnet_model(1, args.num_classes, args.model_width, args.model_depth, args.dropout_frac)
     model.to(device)
     optimizer = Adam(model.parameters(), lr = args.learning_rate)
 
@@ -440,6 +449,9 @@ def run():
     final_epoch = 0
     final_train_loss = 0.0
     final_val_loss = 0.0
+    
+    if not os.path.exists( os.path.join(args.output_dir, f"checkpoints/") ):
+        os.makedirs(os.path.join(args.output_dir, f"checkpoints/") )
 
     for epoch in range(start_epoch + 1, start_epoch + args.epochs):
 
@@ -449,19 +461,15 @@ def run():
         final_train_loss = train_one_epoch(model, optimizer, device, train_loader, epoch, writer, print_freq = args.print_freq)
         final_val_loss = validate_one_epoch(model, device, val_loader, epoch, writer)
 
-    ## save the trained model
-
-    if not os.path.exists( os.path.join(args.output_dir, f"checkpoints/") ):
-        os.makedirs(os.path.join(args.output_dir, f"checkpoints/") )
-
-    torch.save(
-        {
-            'epoch': final_epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': final_train_loss,
-            'val_loss': final_val_loss,
-        }, os.path.join(args.output_dir, f"checkpoints/{timestamp}"))
+        ## save the trained model
+        torch.save(
+            {
+                'epoch': final_epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': final_train_loss,
+                'val_loss': final_val_loss,
+            }, os.path.join(args.output_dir, f"checkpoints/{timestamp}_w{args.model_width}_d{args.model_depth}"))
 
     if args.save_examples:
         VAL_EXAMPLE_INDEX = 0
