@@ -61,13 +61,12 @@ def make_datasets(
     processed_train_files = []
     processed_validation_files = []
 
-    for i, input_file in enumerate(input_files):
-        file_name = os.path.split(input_file)[-1] 
+    for i in range(len(input_files)):
 
         if i < n_train:
-            processed_train_files.append(file_name)
+            processed_train_files.append(f"{i}.pt")
         else:
-            processed_validation_files.append(file_name)
+            processed_validation_files.append(f"{i - n_train}")
 
     ## check that the size of the lists matches between raw and processed files
     assert(len(processed_train_files) == len(train_files))
