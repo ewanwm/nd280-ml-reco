@@ -16,6 +16,7 @@ from torch.nn import MSELoss, CrossEntropyLoss
 from torch_geometric.nn.conv import PointNetConv
 from torcheval.metrics import BinaryAccuracy
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 ## torch_geometric imports
 from torch_geometric.transforms import RadiusGraph
@@ -380,8 +381,9 @@ def run():
     parser.add_argument("--start-from", "-s", required=False, type=str, default=None, help="Checkpoint to start the training from")
     parser.add_argument("--print-freq", "-p", required=False, type=int, default=None, help="print loss and validation info every n batches when training")
     parser.add_argument("--save-examples", required=False, type=bool, default=False, help="Whether or not to save some example plots")
-    parser.add_argument("--val-split", "-v", required=False, type=float, default=0.7, help="The dat:validation split to use when dividing the dataset")
-    parser.add_argument("--batch-size", "-b", required=False, type=int, default=64, help="The dat:validation split to use when dividing the dataset")
+    parser.add_argument("--val-split", "-v", required=False, type=float, default=0.7, help="The data:validation split to use when dividing the dataset")
+    parser.add_argument("--batch-size", "-bs", required=False, type=int, default=64, help="The batch size of the training dataset")
+    parser.add_argument("--val-batch-size", "-vbs", required=False, type=int, default=64, help="The batch size of the validation dataset")
     parser.add_argument("--max-radius", "-r", required=False, type=float, default=50.0, help="The radius to use when performing the ball query when building the graph dataset")
     parser.add_argument("--dropout-frac", required=False, type=float, default=0.5, help="The dropout fraction to use when training the model")
     parser.add_argument("--model-width", required=False, type=int, default=20, help="The width of the pointnet internal layers")
@@ -429,12 +431,13 @@ def run():
     model = build_pointnet_model(1, args.num_classes, args.model_width, args.model_depth, args.dropout_frac)
     model.to(device)
     optimizer = Adam(model.parameters(), lr = args.learning_rate)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, threshold=1e-3)
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size)
-    val_loader = DataLoader(validation_set)
+    val_loader = DataLoader(validation_set, batch_size=args.val_batch_size)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    writer = SummaryWriter(log_dir = 'runs/GCN_trainer_{}'.format(timestamp))
+    writer = SummaryWriter(log_dir = os.path.join(args.output_dir, 'runs/GCN_trainer_{}'.format(timestamp)))
 
     start_epoch = -1
 
@@ -460,6 +463,9 @@ def run():
         final_epoch = epoch
         final_train_loss = train_one_epoch(model, optimizer, device, train_loader, epoch, writer, print_freq = args.print_freq)
         final_val_loss = validate_one_epoch(model, device, val_loader, epoch, writer)
+
+        scheduler.step(final_val_loss)
+        print(f"  lr: {scheduler.get_last_lr()}")
 
         ## save the trained model
         torch.save(
