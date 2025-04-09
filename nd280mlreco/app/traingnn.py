@@ -23,6 +23,7 @@ from torch_geometric.transforms import RadiusGraph
 from torch_geometric import data as tg_data
 from torch_geometric import utils as tg_utils
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn.norm import BatchNorm
 
 ## other stuff
 from datetime import datetime
@@ -176,7 +177,7 @@ def plot_prediction(data:dataloader.HATDataset, logits, thresh:float = 0.5):
     nx.draw(g, data.pos[:, :-1], node_size = data.x / 20.0, width = 1, node_color = node_colours)
 
 
-def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_layers:int, dropout_frac=0.5) -> torch.nn.Module:
+def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_layers:int, dropout_frac=0.5, use_batch_norm=True) -> torch.nn.Module:
     """ Construct a pointnet++ model (largely based on https://pytorch-geometric.readthedocs.io/en/latest/tutorial/point_cloud.html?highlight=pointnet)
 
     :param n_features: number of input features in each node of the input graph
@@ -187,6 +188,8 @@ def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_la
     :type internal_nodes: int
     :param n_layers: number of PointNetConv layars (see https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.PointNetConv.html)
     :type n_layers: int
+    :param use_batch_norm: Whether to add batch normalisation (BatchNorm) layers to the model 
+    :type use_batch_norm: bool
     :return: The model
     :rtype: torch.nn.Module
     """
@@ -198,35 +201,51 @@ def build_pointnet_model(n_features:int, n_classes:int, internal_nodes:int, n_la
                     ReLU(inplace=True)]
                 )
 
-    local_nn_1 = Sequential("x",
+    layers = []
+
+    ## need add batch norm layer first to normalise the first layer
+    if use_batch_norm:
+        layers.append((BatchNorm(internal_nodes), "x -> x"))
+
+    ## add the other layers
+    for _ in range(n_layers):
+        layers.append(
+            (PointNetConv(
+                local_nn = Sequential("x",
                     [(Linear(internal_nodes+3, internal_nodes), "x -> x"),
                     Dropout(dropout_frac),
                     ReLU(inplace=True),
                     Linear(internal_nodes, internal_nodes),
                     Dropout(dropout_frac),
                     ReLU(inplace=True)]
-                )
-
-    global_nn = Sequential("x",
+                ),
+                global_nn = Sequential("x",
                     [(Linear(internal_nodes, internal_nodes), "x -> x"),
                     Dropout(dropout_frac),
                     ReLU(inplace=True),
                     Linear(internal_nodes, internal_nodes),
                     Dropout(dropout_frac),
                     ReLU(inplace=True)]
-                )
+                ), 
+                aggr="mean"), 'x, pos, edge_index -> x'))
 
-    layers = [ 
-        (PointNetConv(local_nn_1, global_nn), 'x, pos, edge_index -> x') 
-        for i in range(n_layers) 
-    ]
+        if use_batch_norm:
+            layers.append((BatchNorm(internal_nodes), "x -> x"))
 
     model = Sequential(
         'x, pos, edge_index', 
         [
             (PointNetConv( 
                 local_nn_0,
-                global_nn,
+                global_nn = Sequential("x",
+                    [(Linear(internal_nodes, internal_nodes), "x -> x"),
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True),
+                    Linear(internal_nodes, internal_nodes),
+                    Dropout(dropout_frac),
+                    ReLU(inplace=True)]
+                ), 
+                aggr = "mean"
             ), 'x, pos, edge_index -> x'),
 
             *layers,
@@ -346,7 +365,7 @@ def validate_one_epoch(
  
     # switch model to eval mode
     # - this makes model do TERRIBLY on validation ????????????????
-    # model.eval()
+    model.eval()
 
     for i, data_val in enumerate(val_loader):
 
@@ -393,6 +412,7 @@ def run():
     parser.add_argument("--dropout-frac", required=False, type=float, default=0.5, help="The dropout fraction to use when training the model")
     parser.add_argument("--model-width", required=False, type=int, default=20, help="The width of the pointnet internal layers")
     parser.add_argument("--model-depth", required=False, type=int, default=2, help="The number of pointnet layers")
+    parser.add_argument("--batch-norm", required=False, type=bool, default=True, help="Whether or not to use batch normalisation layers in the model")
 
     args = parser.parse_args()
 
@@ -433,7 +453,18 @@ def run():
         plt.savefig( os.path.join(args.output_dir, f"label_graph_example.png") )
 
 
-    model = build_pointnet_model(1, args.num_classes, args.model_width, args.model_depth, args.dropout_frac)
+    model = build_pointnet_model(1, args.num_classes, args.model_width, args.model_depth, args.dropout_frac, args.batch_norm)
+
+    ## print a summary of the model
+    print("################# Model #################")
+    print(model)
+    print("#########################################")
+    num_params: int = sum(p.numel() for p in model.parameters())
+    num_trainable: int = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  - Has {num_params} total params")
+    print(f"  -     {num_trainable} are trainable")
+    print("#########################################")
+    
     model.to(device)
     optimizer = Adam(model.parameters(), lr = args.learning_rate)
     scheduler = ReduceLROnPlateau(optimizer, 'min', patience=25, threshold=1e-3)
