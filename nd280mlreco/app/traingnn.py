@@ -271,6 +271,9 @@ def train_one_epoch(
     :rtype: float
     """
 
+    # make sure model is in train mode
+    model.train()
+
     running_loss = 0.0
     bin_accuracy = BinaryAccuracy()
 
@@ -306,12 +309,11 @@ def train_one_epoch(
 
     last_loss = running_loss / n_batches # loss per batch
     print(f'  Train loss: {last_loss}: accuracy: {bin_accuracy.compute()}')
-    tb_x = epoch_index * len(train_loader) + n_batches + 1
+    tb_x = (epoch_index * len(train_loader) + n_batches) * train_loader.batch_size + 1
 
     if tb_writer is not None:
         tb_writer.add_scalar('Loss/train', last_loss, tb_x)
         tb_writer.add_scalar('binary_accuracy/train', bin_accuracy.compute(), tb_x)
-        tb_writer.add_scalar('learning_rate', optimizer.defaults["lr"], tb_x)
 
     return last_loss 
 
@@ -341,7 +343,11 @@ def validate_one_epoch(
 
     running_loss = 0.0
     bin_accuracy = BinaryAccuracy()
-    
+ 
+    # switch model to eval mode
+    # - this makes model do TERRIBLY on validation ????????????????
+    # model.eval()
+
     for i, data_val in enumerate(val_loader):
 
         data_val.to(device)
@@ -358,7 +364,7 @@ def validate_one_epoch(
 
     last_loss = running_loss / i # loss per batch
     print(f'  Validation loss: {last_loss}: accuracy: {bin_accuracy.compute()}')
-    tb_x = epoch_index * len(val_loader) + i + 1
+    tb_x = (epoch_index * len(val_loader) + i) * val_loader.batch_size + 1
 
     if tb_writer is not None:
         tb_writer.add_scalar('Loss/validation', last_loss, tb_x)
@@ -430,13 +436,13 @@ def run():
     model = build_pointnet_model(1, args.num_classes, args.model_width, args.model_depth, args.dropout_frac)
     model.to(device)
     optimizer = Adam(model.parameters(), lr = args.learning_rate)
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, threshold=1e-3)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=25, threshold=1e-3)
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size)
     val_loader = DataLoader(validation_set, batch_size=args.val_batch_size)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    writer = SummaryWriter(log_dir = os.path.join(args.output_dir, 'runs/GCN_trainer_{}'.format(timestamp)))
+    writer = SummaryWriter(log_dir = os.path.join(args.output_dir, f'runs/GCN_trainer_{timestamp}_w{args.model_width}_d{args.model_depth}'))
 
     start_epoch = -1
 
@@ -464,6 +470,9 @@ def run():
         final_val_loss = validate_one_epoch(model, device, val_loader, epoch, writer)
 
         scheduler.step(final_val_loss)
+
+        tb_x = (epoch * len(train_loader)) * train_loader.batch_size
+        writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], tb_x)
         print(f"  lr: {scheduler.get_last_lr()}")
 
         ## save the trained model
